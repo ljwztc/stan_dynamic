@@ -8,6 +8,8 @@ import numpy as np
 import skimage.draw
 import torchvision
 import utils as utils
+import torchvision.transforms.functional as F
+import torch
 
 
 class Echo(torchvision.datasets.VisionDataset):
@@ -59,7 +61,7 @@ class Echo(torchvision.datasets.VisionDataset):
         external_test_location (string): Path to videos to use for external testing.
     """
 
-    def __init__(self, root=None,
+    def __init__(self, root=None, data_name=None,
                  split="train", target_type="EF",
                  mean=0., std=1.,
                  length=16, period=2,
@@ -68,7 +70,8 @@ class Echo(torchvision.datasets.VisionDataset):
                  pad=None,
                  noise=None,
                  target_transform=None,
-                 external_test_location=None):
+                 external_test_location=None,
+                 resize=None):
 
         super().__init__(root, target_transform=target_transform)
 
@@ -86,6 +89,7 @@ class Echo(torchvision.datasets.VisionDataset):
         self.noise = noise
         self.target_transform = target_transform
         self.external_test_location = external_test_location
+        self.resize = resize
 
         self.fnames, self.outcome = [], []
 
@@ -102,7 +106,15 @@ class Echo(torchvision.datasets.VisionDataset):
 
             self.header = data.columns.tolist()
             self.fnames = data["FileName"].tolist()
-            self.fnames = [fn + ".avi" for fn in self.fnames if os.path.splitext(fn)[1] == ""]  # Assume avi if no suffix
+            fname_list = []
+            for fn in self.fnames:
+                if os.path.splitext(fn)[1] == "":
+                    fname_list.append(fn + ".avi")
+                else:
+                    fname_list.append(fn)
+            self.fnames = fname_list
+            # if os.path.splitext(self.fnames[0])[1] == "":
+            #     self.fnames = [fn + ".avi" for fn in self.fnames if os.path.splitext(fn)[1] == ""]  # Assume avi if no suffix
             self.outcome = data.values.tolist()
 
             # Check that files are present
@@ -119,18 +131,42 @@ class Echo(torchvision.datasets.VisionDataset):
 
             with open(os.path.join(self.root, "VolumeTracings.csv")) as f:
                 header = f.readline().strip().split(",")
-                assert header == ["FileName", "X1", "Y1", "X2", "Y2", "Frame"]
+                if header == ["FileName", "X1", "Y1", "X2", "Y2", "Frame"]:
+                    for line in f:
+                        filename, x1, y1, x2, y2, frame = line.strip().split(',')
+                        x1 = float(x1)
+                        y1 = float(y1)
+                        x2 = float(x2)
+                        y2 = float(y2)
+                        frame = int(frame)
+                        if frame not in self.trace[filename]:
+                            self.frames[filename].append(frame)
+                        self.trace[filename][frame].append((x1, y1, x2, y2))
+                if header == ["FileName", "X", "Y", "Frame"]:
+                    # TODO: probably could merge
+                    for line in f:
+                        filename, x, y, frame = line.strip().split(',')
+                        if frame in ["No Systolic", "No Diastolic"]:
+                            self.frames[filename].append(None)
+                        else:
+                            frame = int(frame)
+                            x = float(x)
+                            y = float(y)
+                            if frame not in self.trace[filename]:
+                                self.frames[filename].append(frame)
+                            self.trace[filename][frame].append((x, y))
+                # assert header == ["FileName", "X1", "Y1", "X2", "Y2", "Frame"]
 
-                for line in f:
-                    filename, x1, y1, x2, y2, frame = line.strip().split(',')
-                    x1 = float(x1)
-                    y1 = float(y1)
-                    x2 = float(x2)
-                    y2 = float(y2)
-                    frame = int(frame)
-                    if frame not in self.trace[filename]:
-                        self.frames[filename].append(frame)
-                    self.trace[filename][frame].append((x1, y1, x2, y2))
+                # for line in f:
+                #     filename, x1, y1, x2, y2, frame = line.strip().split(',')
+                #     x1 = float(x1)
+                #     y1 = float(y1)
+                #     x2 = float(x2)
+                #     y2 = float(y2)
+                #     frame = int(frame)
+                #     if frame not in self.trace[filename]:
+                #         self.frames[filename].append(frame)
+                #     self.trace[filename][frame].append((x1, y1, x2, y2))
             for filename in self.frames:
                 for frame in self.frames[filename]:
                     self.trace[filename][frame] = np.array(self.trace[filename][frame])
@@ -258,6 +294,11 @@ class Echo(torchvision.datasets.VisionDataset):
             temp[:, :, self.pad:-self.pad, self.pad:-self.pad] = video  # pylint: disable=E1130
             i, j = np.random.randint(0, 2 * self.pad, 2)
             video = temp[:, :, i:(i + h), j:(j + w)]
+        
+        if self.resize is not None:
+            video = torch.tensor(video)  # Convert to tensor for resizing
+            video = F.resize(video, self.resize)
+            video = video.numpy()  # Convert back to numpy array
 
         return video, target
 

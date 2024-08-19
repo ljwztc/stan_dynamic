@@ -11,22 +11,26 @@ import sklearn.metrics
 import torch
 import torchvision
 import tqdm
+from torch.utils.tensorboard import SummaryWriter
 
 from echo import Echo
 import utils as utils
+from config import config
+from model.convlstm import ConvLSTM
 
 
 def get_parser():
     parser = argparse.ArgumentParser(description="Parser for training video models")
 
-    parser.add_argument("--data_dir", type=str, required=False, default='/data/liujie/data/echocardiogram/EchoNet-Dynamic', help="Path to the data directory (must exist and be a directory)")
+    parser.add_argument("--exp_name", type=str, default="default", help="Task type")
     parser.add_argument("--output", type=str, required=False, default=None, help="Path to the output directory (must be a directory)")
     parser.add_argument("--task", type=str, default="EF", help="Task type")
+    parser.add_argument("--source_data", type=str, default="pediatric", help="The name of trained dataset. [pediatric, dynamic]")
     
-    model_choices = sorted(name for name in torchvision.models.video.__dict__
-                           if name.islower() and not name.startswith("__") 
-                           and callable(torchvision.models.video.__dict__[name]))
-    parser.add_argument("--model_name", type=str, choices=model_choices, default="r2plus1d_18", help="Name of the model")
+    # model_choices = sorted(name for name in torchvision.models.video.__dict__
+    #                        if name.islower() and not name.startswith("__") 
+    #                        and callable(torchvision.models.video.__dict__[name]))
+    parser.add_argument("--model_name", type=str, default="convlstm", help="Name of the model") # mvit_v2_s, r2plus1_18
     
     parser.add_argument("--pretrained", dest="pretrained", action="store_true", help="Use pretrained model")
     parser.add_argument("--random", dest="pretrained", action="store_false", help="Use randomly initialized model")
@@ -35,17 +39,17 @@ def get_parser():
     parser.add_argument("--weights", type=str, required=False, default=None, help="Path to the weights file (must exist and be a file)")
     parser.add_argument("--run_test", dest="run_test", action="store_true", help="Run test after training")
     parser.add_argument("--skip_test", dest="run_test", action="store_false", help="Skip test after training")
-    parser.set_defaults(run_test=False)
+    parser.set_defaults(run_test=True)
 
     parser.add_argument("--num_epochs", type=int, default=45, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--lr_step_period", type=int, default=15, help="Period of learning rate step decay")
-    parser.add_argument("--frames", type=int, default=32, help="Number of frames in a video clip")
+    parser.add_argument("--frames", type=int, default=16, help="Number of frames in a video clip")
     parser.add_argument("--period", type=int, default=2, help="Period between frames in a video clip")
     parser.add_argument("--num_train_patients", type=int, default=None, help="Number of training patients")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of worker threads for data loading")
-    parser.add_argument("--batch_size", type=int, default=8, help="Batch size for training")
+    parser.add_argument("--batch_size", type=int, default=12, help="Batch size for training")
     parser.add_argument("--device", type=str, default=None, help="Device to run the model on (e.g., 'cpu', 'cuda')")
     parser.add_argument("--seed", type=int, default=0, help="Random seed")
 
@@ -98,47 +102,94 @@ def main(args):
             Defaults to 20.
         seed (int, optional): Seed for random number generator. Defaults to 0.
     """
+
     # Seed RNGs
     np.random.seed(args.seed)
     torch.manual_seed(args.seed)
 
     # Set default output directory
     if args.output is None:
-        args.output = os.path.join("output", "video", "{}_{}_{}_{}".format(args.model_name, args.frames, args.period, "pretrained" if args.pretrained else "random"))
+        args.output = os.path.join("output", "video", "{}_{}_{}_{}_{}_{}".format(args.source_data, args.model_name, args.frames, args.period, "pretrained" if args.pretrained else "random", args.num_epochs))
     os.makedirs(args.output, exist_ok=True)
+
+    # save params into output directory
+    args_file = os.path.join(args.output, "args.txt")
+    with open(args_file, 'w') as f:
+        for arg, value in vars(args).items():
+            f.write(f"{arg}: {value}\n")
+
+    # Initialize TensorBoard writer
+    writer = SummaryWriter(log_dir=args.output)
 
     # Set device for computations
     if args.device is None:
         args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Set up model
-    model = torchvision.models.video.__dict__[args.model_name](pretrained=args.pretrained)
+    if args.model_name in ['mvit_v2_s', 'r2plus1_18']:
+        model = torchvision.models.video.__dict__[args.model_name](pretrained=args.pretrained)
+        # for r2plus1d
+        if args.model_name == 'r2plus1_18':
+            model.fc = torch.nn.Linear(model.fc.in_features, 1) 
+            model.fc.bias.data[0] = 55.6
+        elif args.model_name == 'mvit_v2_s':
+            # for mvit_v2_s
+            model.head[1] = torch.nn.Linear(model.head[1].in_features, 1) 
+            model.head[1].bias.data[0] = 55.6
+    elif args.model_name in ['convlstm']:
+        hidden_dims = [3, 45, 64, 128, 256, 512]
+        kernel_size = (3, 3)
+        model = ConvLSTM(input_dim=3,
+                            hidden_dims=hidden_dims,
+                            kernel_size=kernel_size,
+                            batch_first=True)
+        model.fc.bias.data[0] = 55.6
+    # print(model)
 
-    model.fc = torch.nn.Linear(model.fc.in_features, 1)
-    model.fc.bias.data[0] = 55.6
+
     if args.device.type == "cuda":
         model = torch.nn.DataParallel(model)
     model.to(args.device)
 
     if args.weights is not None:
-        checkpoint = torch.load(wargs.eights)
+        checkpoint = torch.load(args.weights)
         model.load_state_dict(checkpoint['state_dict'])
 
     # Set up optimizer
-    optim = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
-    if args.lr_step_period is None:
-        args.lr_step_period = math.inf
-    scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_step_period)
+    if 'mvit' in args.model_name:
+        optim = torch.optim.AdamW(model.parameters(), lr=args.lr, weight_decay=args.weight_decay)
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optim, T_max=args.num_epochs // 2)
+    elif 'r2plus1' in args.model_name:
+        optim = torch.optim.SGD(model.parameters(), lr=args.lr, momentum=0.9, weight_decay=args.weight_decay)
+        if args.lr_step_period is None:
+            args.lr_step_period = math.inf
+        scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_step_period)
+    elif 'convlstm' in args.model_name:
+        optim = torch.optim.Adam(model.parameters(), lr=args.lr)
+        scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_step_period)
 
+    
+    args.data_dir = config[args.source_data]
     # Compute mean and std
     mean, std = utils.get_mean_and_std(Echo(root=args.data_dir, split="train"))
-    kwargs = {"target_type": args.task,
-              "mean": mean,
-              "std": std,
-              "length": args.frames,
-              "period": args.period,
-              }
-
+    print(mean, std)
+    # [32.618484 32.754513 33.059017] [49.997513 50.009624 50.257397] for dynamics
+    # [26.16616  24.224289 27.648663] [44.82573  41.950523 46.429   ] for pediatric
+    if 'mvit' in args.model_name:
+        kwargs = {"target_type": args.task,
+                "mean": mean,
+                "std": std,
+                "length": args.frames,
+                "period": args.period,
+                "resize": (224,)
+                }
+    else:
+        kwargs = {"target_type": args.task,
+                "mean": mean,
+                "std": std,
+                "length": args.frames,
+                "period": args.period,
+                }
     # Set up datasets and dataloaders
     dataset = {}
     dataset["train"] = Echo(root=args.data_dir, split="train", **kwargs, pad=12)
@@ -146,7 +197,7 @@ def main(args):
         # Subsample patients (used for ablation experiment)
         indices = np.random.choice(len(dataset["train"]), args.num_train_patients, replace=False)
         dataset["train"] = torch.utils.data.Subset(dataset["train"], indices)
-    dataset["val"] = Echo(root=args.data_dir, split="val", **kwargs)
+    dataset["test"] = Echo(root='/home/jliu288/data/echocardiogram/pediatric_echo_avi/A4C', split="test", **kwargs)
 
     # Run training and testing loops
     with open(os.path.join(args.output, "log.csv"), "a") as f:
@@ -164,9 +215,11 @@ def main(args):
         except FileNotFoundError:
             f.write("Starting run from scratch\n")
 
+        total_params = sum(p.numel() for p in model.parameters())
+        f.write(f"Total number of parameters: {total_params}\n")
         for epoch in range(epoch_resume, args.num_epochs):
             print("Epoch #{}".format(epoch), flush=True)
-            for phase in ['train', 'val']:
+            for phase in ['train', 'test']:
                 start_time = time.time()
                 for i in range(torch.cuda.device_count()):
                     torch.cuda.reset_peak_memory_stats(i)
@@ -175,16 +228,31 @@ def main(args):
                 dataloader = torch.utils.data.DataLoader(
                     ds, batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, pin_memory=(args.device.type == "cuda"), drop_last=(phase == "train"))
 
-                loss, yhat, y = run_epoch(model, dataloader, phase == "train", optim, args.device)
-                f.write("{},{},{},{},{},{},{},{},{}\n".format(epoch,
+                loss, yhat, y = run_epoch(model, dataloader, phase == "train", optim, args.device, args=args)
+
+                r2 = sklearn.metrics.r2_score(y, yhat)
+                mae = sklearn.metrics.mean_absolute_error(y, yhat)
+                rmse = math.sqrt(sklearn.metrics.mean_squared_error(y, yhat))
+
+                # Log metrics to TensorBoard
+                writer.add_scalar(f'{phase}/loss', loss, epoch)
+                writer.add_scalar(f'{phase}/r2_score', r2, epoch)
+                writer.add_scalar(f'{phase}/mae', mae, epoch)
+                writer.add_scalar(f'{phase}/rmse', rmse, epoch)
+                writer.add_scalar('learning_rate', scheduler.get_last_lr()[0], epoch)
+
+                f.write("epoch:{}, phase: {}, loss: {},r2_score: {}, MAE: {}, RMSE: {}, time: {}, y_size: {}, BATCH_SIZE: {}\n".format(epoch,
                                                               phase,
                                                               loss,
                                                               sklearn.metrics.r2_score(y, yhat),
+                                                              sklearn.metrics.mean_absolute_error(y, yhat),
+                                                              sklearn.metrics.mean_squared_error(y, yhat),
                                                               time.time() - start_time,
                                                               y.size,
-                                                              sum(torch.cuda.max_memory_allocated() for i in range(torch.cuda.device_count())),
-                                                              sum(torch.cuda.max_memory_reserved() for i in range(torch.cuda.device_count())),
                                                               args.batch_size))
+                f.write("(one clip) R2:   {:.3f} ({:.3f} - {:.3f})\n".format(*utils.bootstrap(y, yhat, sklearn.metrics.r2_score)))
+                f.write("(one clip) MAE:  {:.2f} ({:.2f} - {:.2f})\n".format(*utils.bootstrap(y, yhat, sklearn.metrics.mean_absolute_error)))
+                f.write("(one clip) RMSE: {:.2f} ({:.2f} - {:.2f})\n".format(*tuple(map(math.sqrt, utils.bootstrap(y, yhat, sklearn.metrics.mean_squared_error)))))
                 f.flush()
             scheduler.step()
 
@@ -213,12 +281,13 @@ def main(args):
             f.flush()
 
         if args.run_test:
-            for split in ["val", "test"]:
+            for split in ["test"]:
                 # Performance without test-time augmentation
                 dataloader = torch.utils.data.DataLoader(
                     Echo(root=args.data_dir, split=split, **kwargs),
                     batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, pin_memory=(args.device.type == "cuda"))
-                loss, yhat, y = run_epoch(model, dataloader, False, None, args.device)
+                loss, yhat, y = run_epoch(model, dataloader, False, None, args.device, args=args)
+
                 f.write("{} (one clip) R2:   {:.3f} ({:.3f} - {:.3f})\n".format(split, *utils.bootstrap(y, yhat, sklearn.metrics.r2_score)))
                 f.write("{} (one clip) MAE:  {:.2f} ({:.2f} - {:.2f})\n".format(split, *utils.bootstrap(y, yhat, sklearn.metrics.mean_absolute_error)))
                 f.write("{} (one clip) RMSE: {:.2f} ({:.2f} - {:.2f})\n".format(split, *tuple(map(math.sqrt, utils.bootstrap(y, yhat, sklearn.metrics.mean_squared_error)))))
@@ -228,7 +297,7 @@ def main(args):
                 ds = Echo(root=args.data_dir, split=split, **kwargs, clips="all")
                 dataloader = torch.utils.data.DataLoader(
                     ds, batch_size=1, num_workers=args.num_workers, shuffle=False, pin_memory=(args.device.type == "cuda"))
-                loss, yhat, y = run_epoch(model, dataloader, False, None, args.device, save_all=True, block_size=args.batch_size)
+                loss, yhat, y = run_epoch(model, dataloader, False, None, args.device, save_all=True, block_size=args.batch_size, args=args)
                 f.write("{} (all clips) R2:   {:.3f} ({:.3f} - {:.3f})\n".format(split, *utils.bootstrap(y, np.array(list(map(lambda x: x.mean(), yhat))), sklearn.metrics.r2_score)))
                 f.write("{} (all clips) MAE:  {:.2f} ({:.2f} - {:.2f})\n".format(split, *utils.bootstrap(y, np.array(list(map(lambda x: x.mean(), yhat))), sklearn.metrics.mean_absolute_error)))
                 f.write("{} (all clips) RMSE: {:.2f} ({:.2f} - {:.2f})\n".format(split, *tuple(map(math.sqrt, utils.bootstrap(y, np.array(list(map(lambda x: x.mean(), yhat))), sklearn.metrics.mean_squared_error)))))
@@ -275,7 +344,7 @@ def main(args):
                 plt.close(fig)
 
 
-def run_epoch(model, dataloader, train, optim, device, save_all=False, block_size=None):
+def run_epoch(model, dataloader, train, optim, device, save_all=False, block_size=None, args=None):
     """Run one epoch of training/evaluation for segmentation.
 
     Args:
@@ -307,6 +376,9 @@ def run_epoch(model, dataloader, train, optim, device, save_all=False, block_siz
     with torch.set_grad_enabled(train):
         with tqdm.tqdm(total=len(dataloader)) as pbar:
             for (X, outcome) in dataloader:
+
+                if 'convlstm' in args.model_name:
+                    X = X.transpose(1, 2)
 
                 y.append(outcome.numpy())
                 X = X.to(device)
@@ -344,7 +416,8 @@ def run_epoch(model, dataloader, train, optim, device, save_all=False, block_siz
                 total += loss.item() * X.size(0)
                 n += X.size(0)
 
-                pbar.set_postfix_str("{:.2f} ({:.2f}) / {:.2f}".format(total / n, loss.item(), s2 / n - (s1 / n) ** 2))
+                ## loss average, current loss, variance
+                pbar.set_postfix_str("loss ave: {:.2f} (loss: {:.2f}), variance: {:.2f}".format(total / n, loss.item(), s2 / n - (s1 / n) ** 2))
                 pbar.update()
 
     if not save_all:
