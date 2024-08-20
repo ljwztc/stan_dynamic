@@ -1,5 +1,17 @@
 # stan_dynamic
 
+## Preliminary
+```
+conda create -n dynamics python=3.8
+conda activate dynamics
+conda install pytorch torchvision torchaudio pytorch-cuda=12.1 -c pytorch -c nvidia
+# conda install pytorch torchvision torchaudio pytorch-cuda=11.8 -c pytorch -c nvidia
+pip install -i https://pypi.tuna.tsinghua.edu.cn/simple opencv-python
+pip install torchdiffeq
+conda install scikit-image pandas tqdm tensorboard
+```
+
+
 ## test for pediatric
 
 pediatric_mvit_v2_s_16_2_pretrained_80

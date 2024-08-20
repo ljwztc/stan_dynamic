@@ -13,9 +13,9 @@ import torchvision
 import tqdm
 from torch.utils.tensorboard import SummaryWriter
 
-from echo import Echo
+from dataset.echo import Echo
 import utils as utils
-from config import config
+from config import dataset_config
 from model.convlstm import ConvLSTM
 
 
@@ -25,12 +25,9 @@ def get_parser():
     parser.add_argument("--exp_name", type=str, default="default", help="Task type")
     parser.add_argument("--output", type=str, required=False, default=None, help="Path to the output directory (must be a directory)")
     parser.add_argument("--task", type=str, default="EF", help="Task type")
-    parser.add_argument("--source_data", type=str, default="pediatric", help="The name of trained dataset. [pediatric, dynamic]")
+    parser.add_argument("--training_data", type=str, default="pediatric", help="The name of trained dataset. [pediatric, dynamic]")
     
-    # model_choices = sorted(name for name in torchvision.models.video.__dict__
-    #                        if name.islower() and not name.startswith("__") 
-    #                        and callable(torchvision.models.video.__dict__[name]))
-    parser.add_argument("--model_name", type=str, default="convlstm", help="Name of the model") # mvit_v2_s, r2plus1_18
+    parser.add_argument("--model_name", type=str, default="r2plus1_18", help="Name of the model") # mvit_v2_s, r2plus1_18
     
     parser.add_argument("--pretrained", dest="pretrained", action="store_true", help="Use pretrained model")
     parser.add_argument("--random", dest="pretrained", action="store_false", help="Use randomly initialized model")
@@ -45,13 +42,10 @@ def get_parser():
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--lr_step_period", type=int, default=15, help="Period of learning rate step decay")
-    parser.add_argument("--frames", type=int, default=16, help="Number of frames in a video clip")
-    parser.add_argument("--period", type=int, default=2, help="Period between frames in a video clip")
-    parser.add_argument("--num_train_patients", type=int, default=None, help="Number of training patients")
     parser.add_argument("--num_workers", type=int, default=4, help="Number of worker threads for data loading")
     parser.add_argument("--batch_size", type=int, default=12, help="Batch size for training")
     parser.add_argument("--device", type=str, default=None, help="Device to run the model on (e.g., 'cpu', 'cuda')")
-    parser.add_argument("--seed", type=int, default=0, help="Random seed")
+    parser.add_argument("--seed", type=int, default=113, help="Random seed")
 
     return parser
 
@@ -102,6 +96,9 @@ def main(args):
             Defaults to 20.
         seed (int, optional): Seed for random number generator. Defaults to 0.
     """
+    # incorperate attribute
+    for key, value in dataset_config.items():
+        setattr(args, key, value)
 
     # Seed RNGs
     np.random.seed(args.seed)
@@ -109,7 +106,7 @@ def main(args):
 
     # Set default output directory
     if args.output is None:
-        args.output = os.path.join("output", "video", "{}_{}_{}_{}_{}_{}".format(args.source_data, args.model_name, args.frames, args.period, "pretrained" if args.pretrained else "random", args.num_epochs))
+        args.output = os.path.join("output", "video", "{}_{}_{}_{}_{}_{}".format(args.training_data, args.model_name, args.frames, args.period, "pretrained" if args.pretrained else "random", args.num_epochs))
     os.makedirs(args.output, exist_ok=True)
 
     # save params into output directory
@@ -169,7 +166,8 @@ def main(args):
         scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_step_period)
 
     
-    args.data_dir = config[args.source_data]
+
+    args.data_dir = getattr(args, args.training_data + '_dir')
     # Compute mean and std
     mean, std = utils.get_mean_and_std(Echo(root=args.data_dir, split="train"))
     print(mean, std)
