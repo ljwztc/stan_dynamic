@@ -17,6 +17,7 @@ from dataset.echo import Echo
 import utils as utils
 from config import dataset_config
 from model.convlstm import ConvLSTM
+from model.neural_ode import VideoODEModel
 
 
 def get_parser():
@@ -25,9 +26,9 @@ def get_parser():
     parser.add_argument("--exp_name", type=str, default="default", help="Task type")
     parser.add_argument("--output", type=str, required=False, default=None, help="Path to the output directory (must be a directory)")
     parser.add_argument("--task", type=str, default="EF", help="Task type")
-    parser.add_argument("--training_data", type=str, default="pediatric", help="The name of trained dataset. [pediatric, dynamic]")
+    parser.add_argument("--training_data", type=str, default="dynamic", help="The name of trained dataset. [pediatric, dynamic]")
     
-    parser.add_argument("--model_name", type=str, default="r2plus1_18", help="Name of the model") # mvit_v2_s, r2plus1_18
+    parser.add_argument("--model_name", type=str, default="neuralode", help="Name of the model") # mvit_v2_s, r2plus1d_18
     
     parser.add_argument("--pretrained", dest="pretrained", action="store_true", help="Use pretrained model")
     parser.add_argument("--random", dest="pretrained", action="store_false", help="Use randomly initialized model")
@@ -38,7 +39,7 @@ def get_parser():
     parser.add_argument("--skip_test", dest="run_test", action="store_false", help="Skip test after training")
     parser.set_defaults(run_test=True)
 
-    parser.add_argument("--num_epochs", type=int, default=45, help="Number of training epochs")
+    parser.add_argument("--num_epochs", type=int, default=60, help="Number of training epochs")
     parser.add_argument("--lr", type=float, default=1e-4, help="Learning rate")
     parser.add_argument("--weight_decay", type=float, default=1e-4, help="Weight decay")
     parser.add_argument("--lr_step_period", type=int, default=15, help="Period of learning rate step decay")
@@ -52,49 +53,6 @@ def get_parser():
 
 def main(args):
     """Trains/tests EF prediction model.
-
-    \b
-    Args:
-        data_dir (str, optional): Directory containing dataset. Defaults to
-            `echonet.config.DATA_DIR`.
-        output (str, optional): Directory to place outputs. Defaults to
-            output/video/<model_name>_<pretrained/random>/.
-        task (str, optional): Name of task to predict. Options are the headers
-            of FileList.csv. Defaults to ``EF''.
-        model_name (str, optional): Name of model. One of ``mc3_18'',
-            ``r2plus1d_18'', or ``r3d_18''
-            (options are torchvision.models.video.<model_name>)
-            Defaults to ``r2plus1d_18''.
-        pretrained (bool, optional): Whether to use pretrained weights for model
-            Defaults to True.
-        weights (str, optional): Path to checkpoint containing weights to
-            initialize model. Defaults to None.
-        run_test (bool, optional): Whether or not to run on test.
-            Defaults to False.
-        num_epochs (int, optional): Number of epochs during training.
-            Defaults to 45.
-        lr (float, optional): Learning rate for SGD
-            Defaults to 1e-4.
-        weight_decay (float, optional): Weight decay for SGD
-            Defaults to 1e-4.
-        lr_step_period (int or None, optional): Period of learning rate decay
-            (learning rate is decayed by a multiplicative factor of 0.1)
-            Defaults to 15.
-        frames (int, optional): Number of frames to use in clip
-            Defaults to 32.
-        period (int, optional): Sampling period for frames
-            Defaults to 2.
-        n_train_patients (int or None, optional): Number of training patients
-            for ablations. Defaults to all patients.
-        num_workers (int, optional): Number of subprocesses to use for data
-            loading. If 0, the data will be loaded in the main process.
-            Defaults to 4.
-        device (str or None, optional): Name of device to run on. Options from
-            https://pytorch.org/docs/stable/tensor_attributes.html#torch.torch.device
-            Defaults to ``cuda'' if available, and ``cpu'' otherwise.
-        batch_size (int, optional): Number of samples to load per batch
-            Defaults to 20.
-        seed (int, optional): Seed for random number generator. Defaults to 0.
     """
     # incorperate attribute
     for key, value in dataset_config.items():
@@ -108,6 +66,7 @@ def main(args):
     if args.output is None:
         args.output = os.path.join("output", "video", "{}_{}_{}_{}_{}_{}".format(args.training_data, args.model_name, args.frames, args.period, "pretrained" if args.pretrained else "random", args.num_epochs))
     os.makedirs(args.output, exist_ok=True)
+    print(args.output)
 
     # save params into output directory
     args_file = os.path.join(args.output, "args.txt")
@@ -123,10 +82,10 @@ def main(args):
         args.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
     # Set up model
-    if args.model_name in ['mvit_v2_s', 'r2plus1_18']:
+    if args.model_name in ['mvit_v2_s', 'r2plus1d_18']:
         model = torchvision.models.video.__dict__[args.model_name](pretrained=args.pretrained)
         # for r2plus1d
-        if args.model_name == 'r2plus1_18':
+        if args.model_name == 'r2plus1d_18':
             model.fc = torch.nn.Linear(model.fc.in_features, 1) 
             model.fc.bias.data[0] = 55.6
         elif args.model_name == 'mvit_v2_s':
@@ -141,12 +100,15 @@ def main(args):
                             kernel_size=kernel_size,
                             batch_first=True)
         model.fc.bias.data[0] = 55.6
+    elif args.model_name in ['neuralode']:
+        model = VideoODEModel(512, device=args.device)
     # print(model)
 
 
     if args.device.type == "cuda":
         model = torch.nn.DataParallel(model)
     model.to(args.device)
+    print(args.device)
 
     if args.weights is not None:
         checkpoint = torch.load(args.weights)
@@ -164,12 +126,17 @@ def main(args):
     elif 'convlstm' in args.model_name:
         optim = torch.optim.Adam(model.parameters(), lr=args.lr)
         scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_step_period)
-
+    elif 'neuralode' in args.model_name:
+        optim = torch.optim.Adamax(model.parameters(), lr=args.lr)
+        scheduler = torch.optim.lr_scheduler.StepLR(optim, args.lr_step_period)
     
+
 
     args.data_dir = getattr(args, args.training_data + '_dir')
     # Compute mean and std
-    mean, std = utils.get_mean_and_std(Echo(root=args.data_dir, split="train"))
+    # mean, std = utils.get_mean_and_std(Echo(root=args.data_dir, split="train"))
+    mean = np.array([[31.961435, 32.208374, 32.84262]])
+    std = np.array([[49.50315, 49.66181, 50.30775]])
     print(mean, std)
     # [32.618484 32.754513 33.059017] [49.997513 50.009624 50.257397] for dynamics
     # [26.16616  24.224289 27.648663] [44.82573  41.950523 46.429   ] for pediatric
@@ -191,10 +158,6 @@ def main(args):
     # Set up datasets and dataloaders
     dataset = {}
     dataset["train"] = Echo(root=args.data_dir, split="train", **kwargs, pad=12)
-    if args.num_train_patients is not None and len(dataset["train"]) > args.num_train_patients:
-        # Subsample patients (used for ablation experiment)
-        indices = np.random.choice(len(dataset["train"]), args.num_train_patients, replace=False)
-        dataset["train"] = torch.utils.data.Subset(dataset["train"], indices)
     dataset["test"] = Echo(root='/home/jliu288/data/echocardiogram/pediatric_echo_avi/A4C', split="test", **kwargs)
 
     # Run training and testing loops
@@ -278,69 +241,6 @@ def main(args):
             f.write("Best validation loss {} from epoch {}\n".format(checkpoint["loss"], checkpoint["epoch"]))
             f.flush()
 
-        if args.run_test:
-            for split in ["test"]:
-                # Performance without test-time augmentation
-                dataloader = torch.utils.data.DataLoader(
-                    Echo(root=args.data_dir, split=split, **kwargs),
-                    batch_size=args.batch_size, num_workers=args.num_workers, shuffle=True, pin_memory=(args.device.type == "cuda"))
-                loss, yhat, y = run_epoch(model, dataloader, False, None, args.device, args=args)
-
-                f.write("{} (one clip) R2:   {:.3f} ({:.3f} - {:.3f})\n".format(split, *utils.bootstrap(y, yhat, sklearn.metrics.r2_score)))
-                f.write("{} (one clip) MAE:  {:.2f} ({:.2f} - {:.2f})\n".format(split, *utils.bootstrap(y, yhat, sklearn.metrics.mean_absolute_error)))
-                f.write("{} (one clip) RMSE: {:.2f} ({:.2f} - {:.2f})\n".format(split, *tuple(map(math.sqrt, utils.bootstrap(y, yhat, sklearn.metrics.mean_squared_error)))))
-                f.flush()
-
-                # Performance with test-time augmentation
-                ds = Echo(root=args.data_dir, split=split, **kwargs, clips="all")
-                dataloader = torch.utils.data.DataLoader(
-                    ds, batch_size=1, num_workers=args.num_workers, shuffle=False, pin_memory=(args.device.type == "cuda"))
-                loss, yhat, y = run_epoch(model, dataloader, False, None, args.device, save_all=True, block_size=args.batch_size, args=args)
-                f.write("{} (all clips) R2:   {:.3f} ({:.3f} - {:.3f})\n".format(split, *utils.bootstrap(y, np.array(list(map(lambda x: x.mean(), yhat))), sklearn.metrics.r2_score)))
-                f.write("{} (all clips) MAE:  {:.2f} ({:.2f} - {:.2f})\n".format(split, *utils.bootstrap(y, np.array(list(map(lambda x: x.mean(), yhat))), sklearn.metrics.mean_absolute_error)))
-                f.write("{} (all clips) RMSE: {:.2f} ({:.2f} - {:.2f})\n".format(split, *tuple(map(math.sqrt, utils.bootstrap(y, np.array(list(map(lambda x: x.mean(), yhat))), sklearn.metrics.mean_squared_error)))))
-                f.flush()
-
-                # Write full performance to file
-                with open(os.path.join(args.output, "{}_predictions.csv".format(split)), "w") as g:
-                    for (filename, pred) in zip(ds.fnames, yhat):
-                        for (i, p) in enumerate(pred):
-                            g.write("{},{},{:.4f}\n".format(filename, i, p))
-                utils.latexify()
-                yhat = np.array(list(map(lambda x: x.mean(), yhat)))
-
-                # Plot actual and predicted EF
-                fig = plt.figure(figsize=(3, 3))
-                lower = min(y.min(), yhat.min())
-                upper = max(y.max(), yhat.max())
-                plt.scatter(y, yhat, color="k", s=1, edgecolor=None, zorder=2)
-                plt.plot([0, 100], [0, 100], linewidth=1, zorder=3)
-                plt.axis([lower - 3, upper + 3, lower - 3, upper + 3])
-                plt.gca().set_aspect("equal", "box")
-                plt.xlabel("Actual EF (%)")
-                plt.ylabel("Predicted EF (%)")
-                plt.xticks([10, 20, 30, 40, 50, 60, 70, 80])
-                plt.yticks([10, 20, 30, 40, 50, 60, 70, 80])
-                plt.grid(color="gainsboro", linestyle="--", linewidth=1, zorder=1)
-                plt.tight_layout()
-                plt.savefig(os.path.join(args.output, "{}_scatter.pdf".format(split)))
-                plt.close(fig)
-
-                # Plot AUROC
-                fig = plt.figure(figsize=(3, 3))
-                plt.plot([0, 1], [0, 1], linewidth=1, color="k", linestyle="--")
-                for thresh in [35, 40, 45, 50]:
-                    fpr, tpr, _ = sklearn.metrics.roc_curve(y > thresh, yhat)
-                    print(thresh, sklearn.metrics.roc_auc_score(y > thresh, yhat))
-                    plt.plot(fpr, tpr)
-
-                plt.axis([-0.01, 1.01, -0.01, 1.01])
-                plt.xlabel("False Positive Rate")
-                plt.ylabel("True Positive Rate")
-                plt.tight_layout()
-                plt.savefig(os.path.join(args.output, "{}_roc.pdf".format(split)))
-                plt.close(fig)
-
 
 def run_epoch(model, dataloader, train, optim, device, save_all=False, block_size=None, args=None):
     """Run one epoch of training/evaluation for segmentation.
@@ -374,9 +274,6 @@ def run_epoch(model, dataloader, train, optim, device, save_all=False, block_siz
     with torch.set_grad_enabled(train):
         with tqdm.tqdm(total=len(dataloader)) as pbar:
             for (X, outcome) in dataloader:
-
-                if 'convlstm' in args.model_name:
-                    X = X.transpose(1, 2)
 
                 y.append(outcome.numpy())
                 X = X.to(device)

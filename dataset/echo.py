@@ -208,7 +208,8 @@ class Echo(torchvision.datasets.VisionDataset):
 
         # Gather targets
         target = []
-        target.append(np.float32(self.outcome[index][self.header.index(t)]))
+        for t in self.target_type:
+            target.append(np.float32(self.outcome[index][self.header.index(t)]))
 
         if target != []:
             target = tuple(target) if len(target) > 1 else target[0]
